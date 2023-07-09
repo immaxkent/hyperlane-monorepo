@@ -3,6 +3,7 @@ pragma solidity >=0.8.0;
 
 // ============ External Imports ============ //ENSURE ROUTING IS CORRECT HERE BEFORE SUBMISSION
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
 // ============ Internal Imports ============ //ENSURE ROUTING IS CORRECT HERE BEFORE SUBMISSION
@@ -11,7 +12,7 @@ import {IInterchainSecurityModule} from "../../interfaces/IInterchainSecurityMod
 import {Message} from "../../libs/Message.sol";
 
 // ============ CONTRACT ============
-abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
+abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
     // ============ Events ============
     event RelayerCalledMessagePreVerify(address indexed _relayer);
     event MessageDelivered(bytes indexed _message);
@@ -144,16 +145,12 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
      */
     function preVerifiedCheck() internal view returns (bool) {
         bytes memory message = _relayerToMessages[msg.sender];
-        bool flagsForSubModulesPass = assessIfMOfNWatchersHaveFlaggedSubmoduleAsFraudulent(
-                message
-            );
-        bool flagsForMessagesPass = assessIfMOfNWatchersHaveFlaggedMessageAsFraudulent(
-                message
-            );
+        bool flagsForSubModulesPass = mOfNSubModuleCheck(message);
+        bool flagsForMessagesPass = mOfNMessageFlagCheck(message);
         if (
             relayers[msg.sender] &&
-            flagsForSubModulesPass &&
-            flagsForMessagesPass &&
+            !flagsForSubModulesPass &&
+            !flagsForMessagesPass &&
             _checkFraudWindow(message)
         ) {
             return true;
@@ -239,9 +236,11 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
      * @notice returns boolean evaluating if mOfN watchers have flagged a submnodule as fraudulent
      * @param _message message to be used in checks
      */
-    function assessIfMOfNWatchersHaveFlaggedSubmoduleAsFraudulent(
-        bytes memory _message
-    ) public view returns (bool) {
+    function mOfNSubModuleCheck(bytes memory _message)
+        public
+        view
+        returns (bool)
+    {
         IInterchainSecurityModule thisModule = submodule(_message);
         if (subModuleFlagCount[thisModule] > mValueToWarrantFraudulence) {
             return true;
@@ -252,9 +251,11 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
      * @notice returns boolean evaluating if mOfN watchers have flagged a message as fraudulent
      * @param _message message to be used in checks
      */
-    function assessIfMOfNWatchersHaveFlaggedMessageAsFraudulent(
-        bytes memory _message
-    ) public view returns (bool) {
+    function mOfNMessageFlagCheck(bytes memory _message)
+        public
+        view
+        returns (bool)
+    {
         if (messageFlagCount[_message] > mValueToWarrantFraudulence) {
             return true;
         }
@@ -269,6 +270,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
      */
     function verify(bytes memory _metadata, bytes memory _message)
         public
+        nonReentrant
         returns (bool)
     {
         bool verified = IInterchainSecurityModule(currentModule).verify(
@@ -306,21 +308,16 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
      *         delivers it to the destination address
      * @param  _destination destination for message sent by relayer (msg.sender)
      */
-    function deliver(address _destination) public {
+    function deliver(address _destination) public payable nonReentrant {
         bytes storage message = _relayerToMessages[msg.sender];
         bytes storage metadata = _relayerToMetadata[msg.sender];
-        mutex = false;
-        if (!mutex) {
-            mutex = true;
-            bool isVerified = verify(metadata, message);
-            if (isVerified) {
-                bool verifiedMessagePassesChecks = preVerifiedCheck();
-                if (verifiedMessagePassesChecks) {
-                    Address.functionCall(_destination, message);
-                    emit MessageDelivered(message);
-                }
+        bool isVerified = verify(metadata, message);
+        if (isVerified) {
+            bool verifiedMessagePassesChecks = preVerifiedCheck();
+            if (verifiedMessagePassesChecks) {
+                Address.functionCall(_destination, message);
+                emit MessageDelivered(message);
             }
-            mutex = false;
         }
     }
 }
