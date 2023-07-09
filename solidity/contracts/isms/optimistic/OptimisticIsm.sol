@@ -29,8 +29,8 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
     // ============ Core Variables ============
     mapping(address => bool) public relayers; //relayers who have sent messages pending between preVerify() and deliver()
     mapping(bytes => IInterchainSecurityModule) public messageToSubmodule; //message to submodule mapping
-    mapping(uint32 => IInterchainSecurityModule) public _submodule; //domain to submodule mapping
-    mapping(address => bytes) public _relayerToMessages; //relayer to message mapping
+    mapping(uint32 => IInterchainSecurityModule) private _submodule; //domain to submodule mapping
+    mapping(address => bytes) private _relayerToMessages; //relayer to message mapping
     mapping(address => bytes) private _relayerToMetadata; //relayer to metadata mapping
     mapping(address => bool) public watchers; //watcher statuses configured by owner
     IInterchainSecurityModule public currentModule; //currently configured ISM
@@ -293,6 +293,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
         returns (bool)
     {
         _relayerToMessages[msg.sender] = _message;
+        relayers[msg.sender] = true;
         // messagesToFraudFlags[_message] = false;
         _relayerToMetadata[msg.sender] = _metadata;
         _initiateFraudWindow(_message);
@@ -315,6 +316,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
             bool verifiedMessagePassesChecks = preVerifiedCheck();
             if (verifiedMessagePassesChecks) {
                 Address.functionCall(_destination, message);
+                relayers[msg.sender] = false;
                 emit MessageDelivered(message);
             }
         }
