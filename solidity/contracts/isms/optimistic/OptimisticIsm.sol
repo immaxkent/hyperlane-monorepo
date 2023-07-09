@@ -30,7 +30,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
     mapping(uint32 => IInterchainSecurityModule) public _submodule; //domain to submodule mapping
     mapping(address => bytes) public _relayerToMessages; //relayer to message mapping
     mapping(address => bytes) private _relayerToMetadata; //relayer to metadata mapping
-    mapping(bytes => bool) public messagesToFraudFlags; //mapping of all messages sent for pre verification to bools signifying fraudlulence
+    // mapping(bytes => bool) public messagesToFraudFlags; //mapping of all messages sent for pre verification to bools signifying fraudlulence
     IInterchainSecurityModule public currentModule; //currently configured ISM
     mapping(address => bool) public watchers; //watcher statuses configured by owner
     address[] public watchersArray; //array of configured wactehrs
@@ -135,17 +135,23 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
 
     /**
      * @notice checks to see if:
-     * 1	The message has been pre-verified
-     * 2	The submodule used to pre-verify the message has not been flagged as compromised by m-of-n watchers
+     * 1	The message sent has not been flagged as compromised by m-of-n watchers
+     * 2	The submodule used has not been flagged as compromised by m-of-n watchers
      * 3	The fraud window has elapsed
      */
     function preVerifiedCheck() internal view returns (bool) {
         bytes memory message = _relayerToMessages[msg.sender];
+        bool flagsForSubModulesPass = assessIfMOfNWatchersHaveFlaggedSubmoduleAsFraudulent(
+                message
+            );
+        bool flagsForMessagesPass = assessIfMOfNWatchersHaveFlaggedMessageAsFraudulent(
+                message
+            );
         if (
             relayers[msg.sender] &&
-            !subModuleFlags[currentModule] &&
-            _checkFraudWindow(message) &&
-            !messagesToFraudFlags[message]
+            flagsForSubModulesPass &&
+            flagsForMessagesPass &&
+            _checkFraudWindow(message)
         ) {
             return true;
         }
@@ -275,7 +281,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
         returns (bool)
     {
         _relayerToMessages[msg.sender] = _message;
-        messagesToFraudFlags[_message] = false;
+        // messagesToFraudFlags[_message] = false;
         _relayerToMetadata[msg.sender] = _metadata;
         _initiateFraudWindow(_message);
         emit FraudWindowOpened(currentModule);
