@@ -18,6 +18,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
     event MessageDelivered(bytes indexed _message);
     event SubmoduleChanged(IInterchainSecurityModule _module);
     event FraudWindowOpened(IInterchainSecurityModule _module);
+    event MessageFlaggedFraudulent(bytes _message);
     event SubmoduleFlaggedFraudulent(
         IInterchainSecurityModule _module,
         address _watcher
@@ -226,6 +227,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
         if (!watcherAlreadyFlaggedMessage[msg.sender][_message]) {
             messageFlagCount[_message]++;
             watcherAlreadyFlaggedMessage[msg.sender][_message] = true;
+            emit MessageFlaggedFraudulent(_message);
         }
     }
 
