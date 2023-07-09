@@ -46,9 +46,6 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
     uint256 public mValueToWarrantFraudulence; //the number of flags, denoted by the owner, required to warrant either a submodule or message fraudulent
     uint256 public fraudWindow; //fraud window duration as defined by owner in deployment OR after via changeFraudWindow()
 
-    // ============ Security Variables ============
-    bool public mutex; //used in calls to external contracts
-
     // ============ Custom Errors ============
     error NotWatcher(address attemptedAccess);
     error ISMDoesntExist(bytes message);
