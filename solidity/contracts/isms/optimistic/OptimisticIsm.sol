@@ -36,11 +36,10 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
 
     // ============ Fraud Variables ============
     mapping(bytes => uint256) public fraudWindows; //message to uint (time duration) to be initiated by initiateFraudWindow()
-    mapping(IInterchainSecurityModule => bool) public subModuleFlags; //markFraudulent() manipulates this
-    mapping(address => mapping(IInterchainSecurityModule => bool))
-        public watcherAlreadyFlaggedModule; //watcher address => submodule => hasFlaggedFraudulent mapping
     mapping(IInterchainSecurityModule => uint256) public subModuleFlagCount; //the number of times a module has been marked fraudulent
     mapping(bytes => uint256) public messageFlagCount; //the number of times a module has been marked fraudulent
+    mapping(address => mapping(IInterchainSecurityModule => bool))
+        public watcherAlreadyFlaggedModule; //watcher address => submodule => hasFlaggedFraudulent mapping
     mapping(address => mapping(bytes => bool))
         public watcherAlreadyFlaggedMessage; //watcher address => submodule => hasFlaggedFraudulent mapping
     uint256 public mValueToWarrantFraudulence; //the number of flags, denoted by the owner, required to warrant either a submodule or message fraudulent
@@ -80,6 +79,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
     }
 
     // ============ Internal/Private Functions ============
+
     /**
      * @notice sets ISM to be used in message verification
      * @param _domain origin domain of the ISM
