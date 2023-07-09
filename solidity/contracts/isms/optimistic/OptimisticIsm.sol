@@ -12,6 +12,15 @@ import {IInterchainSecurityModule} from "../../interfaces/IInterchainSecurityMod
 import {Message} from "../../libs/Message.sol";
 
 // ============ CONTRACT ============
+
+/**
+ * @notice Optimistic Interchain Security Module implementation
+ *          splitting verification and delivery into two seperate transactions,
+ *          allowing for a configurable fraud window to open between preVerify()
+ *          and deliver() wherein watchers, configurable by the owner, may flag
+ *          submodules (used for verification) or messages as fraudulent
+ */
+
 abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
     // ============ Events ============
     event RelayerCalledMessagePreVerify(address indexed _relayer);
@@ -74,7 +83,6 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
         _set(_domain, _module);
         fraudWindow = _fraudWindow;
         mValueToWarrantFraudulence = _mValue;
-        //call staticMofNAddressSetFactory to generate Watchers.sol implementation
     }
 
     // ============ Internal/Private Functions ============
@@ -137,9 +145,10 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
 
     /**
      * @notice checks to see if:
-     * 1	The message sent has not been flagged as compromised by m-of-n watchers
-     * 2	The submodule used has not been flagged as compromised by m-of-n watchers
-     * 3	The fraud window has elapsed
+     * 1	The relayer has sent an active message in preVerification
+     * 2    The message sent has not been flagged as compromised by m-of-n watchers
+     * 3	The submodule used has not been flagged as compromised by m-of-n watchers
+     * 4	The fraud window has elapsed
      */
     function preVerifiedCheck() internal view returns (bool) {
         bytes memory message = _relayerToMessages[msg.sender];
@@ -293,8 +302,6 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
         returns (bool)
     {
         _relayerToMessages[msg.sender] = _message;
-        relayers[msg.sender] = true;
-        // messagesToFraudFlags[_message] = false;
         _relayerToMetadata[msg.sender] = _metadata;
         _initiateFraudWindow(_message);
         emit FraudWindowOpened(currentModule);
@@ -305,17 +312,22 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
     /**
      * @notice calls preVerifiedCheck() to ensure the submodule has not been flagged as fraudulent
      *         and, if preVerifiedCheck() returns true, verifies the message and
-     *         delivers it to the destination address
+     *         delivers it to the destination address. thereafter, the relayer's message
+     *         mapping is marked false, opening the gate for more messages to be sent
      * @param  _destination destination for message sent by relayer (msg.sender)
      */
-    function deliver(address _destination) public payable nonReentrant {
+    function deliver(address _destination, uint256 _value)
+        public
+        payable
+        nonReentrant
+    {
         bytes storage message = _relayerToMessages[msg.sender];
         bytes storage metadata = _relayerToMetadata[msg.sender];
         bool isVerified = verify(metadata, message);
         if (isVerified) {
             bool verifiedMessagePassesChecks = preVerifiedCheck();
             if (verifiedMessagePassesChecks) {
-                Address.functionCall(_destination, message);
+                Address.functionCallWithValue(_destination, message, _value);
                 relayers[msg.sender] = false;
                 emit MessageDelivered(message);
             }
@@ -326,18 +338,23 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
 //////////////////////////////////////////////////////////////////////////////////////////////////
 /*
 @dev
-notes on contract architecture;
+notes and thoughts on contract architecture;
     1   This architecture runs on the premise that each relayer can only send 1 message at a time 
             through the OptimisticISM
-    2   What if a submodule has been modified after it has been pre-verified? 
+    2   What if a submodule has been modified after it has been pre-verified? On this basis (and the ambiguity of the brief),
+            the Optimistic model is followed in the sense that message **verification** and **deliver** are seperated by a 
+            configurable fraud window, where (once the fraud window has passed) the messages are viable to be verified 
+            (called as part of message delivery, as defined in the brief) and delivered
     3   All trust is put in the hands of watchers, who don't seem to be incentivised at this stage.
-    4   Any and all watchers can flag submodules as fraudulent
-    5   The removeWatchers() functionality will leave redundant watcher addresses in place, potentially 
-            causing overflow issues with time
-    6   Message delivery on line 154 assumes that the receiver's fallback function contains the logic 
-            to process the interchain message
-    7   What degree of privacy each operator (owner) of the OptimisticIsm wants is unclear. For the sake
+    4   Any and all watchers can flag submodules and messages as fraudulent
+    5   Anyone can relay messages to the ISM
+    6   What degree of privacy each operator (owner) of the OptimisticIsm wants is unclear. For the sake
             of security and clarity, all modifications to message, submodule state and fraudulence have been 
             included as events
+    7   To ensure long term compatibility, the deliver() function has been made payable to allow passing ETH
+            forward depending on the reciever of the message 
+    8   I couldn't be clear on how implementing another contract via StaticMOfNAddressSetFactory may save gas when
+            __configuring watchers__ as compared to the configureWatchers() implementation shown here, which simply
+            utilises the getter/setter in a mapping to configure watchers based on any _watcherArray and _statuses passed
  */
 //////////////////////////////////////////////////////////////////////////////////////////////////
