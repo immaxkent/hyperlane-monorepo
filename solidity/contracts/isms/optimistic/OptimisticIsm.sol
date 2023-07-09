@@ -17,26 +17,51 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
     event MessageDelivered(bytes indexed _message);
     event SubmoduleChanged(IInterchainSecurityModule _module);
     event FraudWindowOpened(IInterchainSecurityModule _module);
-    event SubmoduleMarkedFraudulent(IInterchainSecurityModule _module);
+    event SubmoduleFlaggedFraudulent(
+        IInterchainSecurityModule _module,
+        address _watcher
+    );
+    event MValueChanged(uint256 _mValue);
+    event FraudWindowChanged(uint256 _newFraudWindow);
 
     // ============ Core Variables ============
-    mapping(address => bool) public watchers; //watchers added by owner
     mapping(address => bool) public relayers; //relayers who have sent messages pending between preVerify() and deliver()
-    mapping(uint32 => IInterchainSecurityModule) public module; //domain to submodule mapping
-    mapping(address => bytes) private _relayerToMessages; //relayer to message mapping
+    mapping(bytes => IInterchainSecurityModule) public messageToSubmodule; //message to submodule mapping
+    mapping(uint32 => IInterchainSecurityModule) public _submodule; //domain to submodule mapping
+    mapping(address => bytes) public _relayerToMessages; //relayer to message mapping
+    mapping(address => bytes) private _relayerToMetadata; //relayer to metadata mapping
+    mapping(bytes => bool) public messagesToFraudFlags; //mapping of all messages sent for pre verification to bools signifying fraudlulence
+    IInterchainSecurityModule public currentModule; //currently configured ISM
+    mapping(address => bool) public watchers; //watcher statuses configured by owner
+    address[] public watchersArray; //array of configured wactehrs
 
     // ============ Fraud Variables ============
-    uint256 public fraudWindow; //fraud window duration as defined by owner in deployment OR after via changeFraudWindow()
     mapping(bytes => uint256) public fraudWindows; //message to uint (time duration) to be initiated by initiateFraudWindow()
     mapping(IInterchainSecurityModule => bool) public subModuleFlags; //markFraudulent() manipulates this
+    mapping(address => mapping(IInterchainSecurityModule => bool))
+        public watcherAlreadyFlaggedModule; //watcher address => submodule => hasFlaggedFraudulent mapping
+    mapping(IInterchainSecurityModule => uint256) public subModuleFlagCount; //the number of times a module has been marked fraudulent
+    mapping(bytes => uint256) public messageFlagCount; //the number of times a module has been marked fraudulent
+    mapping(address => mapping(bytes => bool))
+        public watcherAlreadyFlaggedMessage; //watcher address => submodule => hasFlaggedFraudulent mapping
+    uint256 public mValueToWarrantFraudulence; //the number of flags, denoted by the owner, required to warrant either a submodule or message fraudulent
+    uint256 public fraudWindow; //fraud window duration as defined by owner in deployment OR after via changeFraudWindow()
+
+    // ============ Security Variables ============
+    bool public mutex; //used in calls to external contracts
 
     // ============ Custom Errors ============
-
     error NotWatcher(address attemptedAccess);
+    error ISMDoesntExist(bytes message);
+    error NotAContract(uint32 _domain, IInterchainSecurityModule _module);
+    error DifferentLengthOfArrayInputs(
+        address[] _watchersArray,
+        bool[] _statuses
+    );
 
     // ============ Modifiers ============
-    modifier onlyWatcher(address _inquisitor) {
-        if (!watchers[_inquisitor]) {
+    modifier onlyWatcher() {
+        if (!watchers[msg.sender]) {
             revert NotWatcher(msg.sender);
         }
         _;
@@ -46,55 +71,67 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
     constructor(
         uint32 _domain,
         IInterchainSecurityModule _module,
-        uint256 _fraudWindow
+        uint256 _fraudWindow,
+        uint256 _mValue
     ) {
         _set(_domain, _module);
         fraudWindow = _fraudWindow;
+        mValueToWarrantFraudulence = _mValue;
+        //call staticMofNAddressSetFactory to generate Watchers.sol implementation
     }
 
     // ============ Internal/Private Functions ============
-
     /**
      * @notice sets ISM to be used in message verification
      * @param _domain origin domain of the ISM
      * @param _module ISM module to use for verification
      */
     function _set(uint32 _domain, IInterchainSecurityModule _module) internal {
-        require(Address.isContract(address(_module)), "!contract");
-        module[_domain] = _module;
+        if (!Address.isContract(address(_module))) {
+            revert NotAContract(_domain, _module);
+        }
+        _submodule[_domain] = _module;
+        currentModule = _module;
     }
 
     /**
      * @notice opens a fraud window in which watchers can mark submodules as fraudulent
      */
     function _initiateFraudWindow(bytes calldata _message) internal {
-        fraudWindows[_message] = block.timestamp + fraudWindow;
+        fraudWindows[_message] = block.timestamp;
     }
 
     /**
      * @notice checks to see if the fraud window is still open
      * @param _message formatted Hyperlane message (see Message.sol) mapped to fraud window
      */
-    function _checkFraudWindow(bytes calldata _message)
+    function _checkFraudWindow(bytes memory _message)
         internal
+        view
         returns (bool)
     {
-        if (block.timestamp > fraudWindows[_message]) {
+        if (block.timestamp > fraudWindows[_message] + fraudWindow) {
             return true;
         } else {
             return false;
         }
     }
 
+    // ============ External/Public Functions ============
+
+    function defineMValue(uint256 _mValue) public onlyOwner {
+        mValueToWarrantFraudulence = _mValue;
+        emit MValueChanged(_mValue);
+    }
+
     /**
      * @notice allows owner to modify current fraud window duration
      * @param _newFraudWindow time duration of new fraud window
      */
-    function _changeFraudWindow(uint256 _newFraudWindow) external onlyOwner {
+    function changeFraudWindow(uint256 _newFraudWindow) external onlyOwner {
         fraudWindow = _newFraudWindow;
+        emit FraudWindowChanged(_newFraudWindow);
     }
-
-    // ============ External/Public Functions ============
 
     /**
      * @notice checks to see if:
@@ -102,15 +139,13 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
      * 2	The submodule used to pre-verify the message has not been flagged as compromised by m-of-n watchers
      * 3	The fraud window has elapsed
      */
-    function preVerifiedCheck(bytes calldata _metadata, bytes calldata _message)
-        public
-        returns (bool)
-    {
-        IInterchainSecurityModule currentModule = submodule(_message);
+    function preVerifiedCheck() internal view returns (bool) {
+        bytes memory message = _relayerToMessages[msg.sender];
         if (
             relayers[msg.sender] &&
             !subModuleFlags[currentModule] &&
-            _checkFraudWindow(_message)
+            _checkFraudWindow(message) &&
+            !messagesToFraudFlags[message]
         ) {
             return true;
         }
@@ -126,6 +161,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
         onlyOwner
     {
         _set(_domain, _module);
+        currentModule = _module;
         emit SubmoduleChanged(_module);
     }
 
@@ -135,60 +171,102 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
      * @param _message formatted Hyperlane message (see Message.sol).
      * @return module ISM being used to verify _message
      */
-    function submodule(bytes calldata _message)
+    function submodule(bytes memory _message)
         public
         view
         override
         returns (IInterchainSecurityModule)
     {
-        IInterchainSecurityModule module = module[Message.origin(_message)];
-        require(
-            address(module) != address(0),
-            "No ISM found for origin domain"
-        );
+        IInterchainSecurityModule module = messageToSubmodule[_message];
         return module;
+    }
+
+    /**
+     * @notice allows owner to add/modify watchers in watchers mapping
+     * @param _watchersArray array of watcher addresses
+     * @param _statuses correlating statuses of watchers being added/modified
+     */
+    function configureWatchers(
+        address[] memory _watchersArray,
+        bool[] memory _statuses
+    ) public onlyOwner {
+        if (_watchersArray.length != _statuses.length) {
+            revert DifferentLengthOfArrayInputs(_watchersArray, _statuses);
+        }
+        for (uint8 i = 0; i < _watchersArray.length; i++) {
+            watchers[_watchersArray[i]] = _statuses[i];
+        }
     }
 
     /**
      * @notice allows watchers added by owner to flag ISM submodule(s) as fraudulent
      * @param _message formatted Hyperlane message (see Message.sol).
      */
-    function markFraudulent(bytes calldata _message)
-        external
-        onlyWatcher(msg.sender)
+    function flagSubmoduleAsFraudulent(bytes calldata _message)
+        public
+        onlyWatcher
     {
         IInterchainSecurityModule thisModule = submodule(_message);
-        subModuleFlags[thisModule] = true;
-        emit SubmoduleMarkedFraudulent(thisModule);
+        if (!watcherAlreadyFlaggedModule[msg.sender][thisModule]) {
+            subModuleFlagCount[thisModule]++;
+            watcherAlreadyFlaggedModule[msg.sender][thisModule] = true;
+        }
+        emit SubmoduleFlaggedFraudulent(thisModule, msg.sender);
     }
 
     /**
-     * @notice allows owner to add watchers to watchers mapping
-     * @param _watchersArray array of watcher addresses
+     * @notice allows watchers added by owner to flag messages as fraudulent
+     * @param _message message to be marked as fraudulent
      */
-    function addWatchers(address[] calldata _watchersArray) external onlyOwner {
-        uint8 i;
-        for (i = 0; i < _watchersArray.length; i++) {
-            watchers[_watchersArray[i]] = true;
+    function flagMessageAsFraudulent(bytes memory _message) public onlyWatcher {
+        // messagesToFraudFlags[_message] = true;
+        if (!watcherAlreadyFlaggedMessage[msg.sender][_message]) {
+            messageFlagCount[_message]++;
+            watcherAlreadyFlaggedMessage[msg.sender][_message] = true;
         }
     }
 
-    /**
-     * @notice allows owner to mark watchers as redunant in watchers mapping
-     * @param _watcherToBeRemoved address of watcher to be made redunant
-     */
-    function removeWatcher(address _watcherToBeRemoved) external onlyOwner {
-        watchers[_watcherToBeRemoved] = false;
+    function assessIfMOfNWatchersHaveFlaggedSubmoduleAsFraudulent(
+        bytes memory _message
+    ) public view returns (bool) {
+        IInterchainSecurityModule thisModule = submodule(_message);
+        if (subModuleFlagCount[thisModule] > mValueToWarrantFraudulence) {
+            return true;
+        }
+    }
+
+    function assessIfMOfNWatchersHaveFlaggedMessageAsFraudulent(
+        bytes memory _message
+    ) public view returns (bool) {
+        if (messageFlagCount[_message] > mValueToWarrantFraudulence) {
+            return true;
+        }
     }
 
     // ============ Core Functionality ============
 
     /**
-     * @notice pre verifies messages recieved by a relayer,
+     * @notice outsources verification logic to the configured submodule
+     * @param _metadata arbitrary bytes that can be specified by an off-chain relayer, used in message verification
+     * @param  _message formatted Hyperlane message (see Message.sol).
+     */
+    function verify(bytes memory _metadata, bytes memory _message)
+        public
+        returns (bool)
+    {
+        bool verified = IInterchainSecurityModule(currentModule).verify(
+            _metadata,
+            _message
+        );
+        return verified;
+    }
+
+    /**
+     * @notice recieves and stores message and metadata sent by a relayer,
      *         adding their addresses to the relayers mapping,
      *         initiating a fraudWindow, mapping the message to this fraudWindow and
      *         mapping the message sent to the submodule used to verify the message
-     * @param  _metadata arbitrary bytes that can be specified by an off-chain relayer
+     * @param  _metadata arbitrary bytes that can be specified by an off-chain relayer, used in message verification
      * @param  _message formatted Hyperlane message (see Message.sol).
      */
     function preVerify(bytes calldata _metadata, bytes calldata _message)
@@ -196,32 +274,36 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
         override
         returns (bool)
     {
-        //require(_relayerToMessages[msg.sender], "you are only allowed to send one message at a time");
-        bool isVerified = verify(_metadata, _message);
-        if (isVerified) {
-            _relayerToMessages[msg.sender] = _message;
-            _initiateFraudWindow(_message);
-            IInterchainSecurityModule currentModule = submodule(_message);
-            emit FraudWindowOpened(currentModule);
-            emit RelayerCalledMessagePreVerify(msg.sender);
-            return true;
-        }
+        _relayerToMessages[msg.sender] = _message;
+        messagesToFraudFlags[_message] = false;
+        _relayerToMetadata[msg.sender] = _metadata;
+        _initiateFraudWindow(_message);
+        emit FraudWindowOpened(currentModule);
+        emit RelayerCalledMessagePreVerify(msg.sender);
+        return true;
     }
 
     /**
      * @notice calls preVerifiedCheck() to ensure the submodule has not been flagged as fraudulent
-     *         and, if preVerifiedCheck() returns true, delivers the message to recipient address
+     *         and, if preVerifiedCheck() returns true, verifies the message and
+     *         delivers it to the destination address
      * @param  _destination destination for message sent by relayer (msg.sender)
      */
-    function deliver(
-        address _destination,
-        bytes calldata _metadata,
-        bytes calldata _message
-    ) public {
-        bool messagePassesChecks = preVerifiedCheck(_metadata, _message);
-        if (messagePassesChecks) {
-            _destination.call(_message);
-            emit MessageDelivered(_message);
+    function deliver(address _destination) public {
+        bytes storage message = _relayerToMessages[msg.sender];
+        bytes storage metadata = _relayerToMetadata[msg.sender];
+        mutex = false;
+        if (!mutex) {
+            mutex = true;
+            bool isVerified = verify(metadata, message);
+            if (isVerified) {
+                bool verifiedMessagePassesChecks = preVerifiedCheck();
+                if (verifiedMessagePassesChecks) {
+                    Address.functionCall(_destination, message);
+                    emit MessageDelivered(message);
+                }
+            }
+            mutex = false;
         }
     }
 }
@@ -239,12 +321,7 @@ notes on contract architecture;
             causing overflow issues with time
     6   Message delivery on line 154 assumes that the receiver's fallback function contains the logic 
             to process the interchain message
-    7   If someone double sends a message, the fraudWindows mapping is reset. 
-            If however this second message send is front run, it could provide a pass in verify() and 
-            provide a vulnerability through which malicious messages could make it through the model. 
-            The require() statement on line136 is provided as a failsafe against this, albeit commented
-            out 
-    8   What degree of privacy each operator (owner) of the OptimisticIsm wants is unclear. For the sake
+    7   What degree of privacy each operator (owner) of the OptimisticIsm wants is unclear. For the sake
             of security and clarity, all modifications to message, submodule state and fraudulence have been 
             included as events
  */
