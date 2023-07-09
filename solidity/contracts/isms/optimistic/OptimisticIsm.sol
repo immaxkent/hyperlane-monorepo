@@ -30,9 +30,8 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
     mapping(uint32 => IInterchainSecurityModule) public _submodule; //domain to submodule mapping
     mapping(address => bytes) public _relayerToMessages; //relayer to message mapping
     mapping(address => bytes) private _relayerToMetadata; //relayer to metadata mapping
-    // mapping(bytes => bool) public messagesToFraudFlags; //mapping of all messages sent for pre verification to bools signifying fraudlulence
-    IInterchainSecurityModule public currentModule; //currently configured ISM
     mapping(address => bool) public watchers; //watcher statuses configured by owner
+    IInterchainSecurityModule public currentModule; //currently configured ISM
     address[] public watchersArray; //array of configured wactehrs
 
     // ============ Fraud Variables ============
@@ -232,6 +231,10 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
         }
     }
 
+    /**
+     * @notice returns boolean evaluating if mOfN watchers have flagged a submnodule as fraudulent
+     * @param _message message to be used in checks
+     */
     function assessIfMOfNWatchersHaveFlaggedSubmoduleAsFraudulent(
         bytes memory _message
     ) public view returns (bool) {
@@ -241,6 +244,10 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
         }
     }
 
+    /**
+     * @notice returns boolean evaluating if mOfN watchers have flagged a message as fraudulent
+     * @param _message message to be used in checks
+     */
     function assessIfMOfNWatchersHaveFlaggedMessageAsFraudulent(
         bytes memory _message
     ) public view returns (bool) {
