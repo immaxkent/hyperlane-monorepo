@@ -118,6 +118,10 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable {
 
     // ============ External/Public Functions ============
 
+    /**
+     * @notice allows owner to define M value when considering the number of flags required to define fraudulence
+     * @param _mValue time duration of new fraud window
+     */
     function defineMValue(uint256 _mValue) public onlyOwner {
         mValueToWarrantFraudulence = _mValue;
         emit MValueChanged(_mValue);
