@@ -25,14 +25,14 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
     // ============ Events ============
     event RelayerCalledMessagePreVerify(address indexed _relayer);
     event MessageDelivered(bytes indexed _message);
-    event SubmoduleChanged(IInterchainSecurityModule _module);
-    event FraudWindowOpened(IInterchainSecurityModule _module);
     event MessageFlaggedFraudulent(bytes _message);
+    event SubmoduleChanged(IInterchainSecurityModule _module);
     event SubmoduleFlaggedFraudulent(
         IInterchainSecurityModule _module,
         address _watcher
     );
     event MValueChanged(uint256 _mValue);
+    event FraudWindowOpened(IInterchainSecurityModule _module);
     event FraudWindowChanged(uint256 _newFraudWindow);
 
     // ============ Core Variables ============
@@ -129,7 +129,10 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
      * @notice allows owner to define M value when considering the number of flags required to define fraudulence
      * @param _mValue time duration of new fraud window
      */
-    function defineMValue(uint256 _mValue) public onlyOwner {
+    function defineMValue(uint256 _mValue) 
+        public 
+        onlyOwner 
+    {
         mValueToWarrantFraudulence = _mValue;
         emit MValueChanged(_mValue);
     }
@@ -138,19 +141,26 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
      * @notice allows owner to modify current fraud window duration
      * @param _newFraudWindow time duration of new fraud window
      */
-    function changeFraudWindow(uint256 _newFraudWindow) external onlyOwner {
+    function changeFraudWindow(uint256 _newFraudWindow) 
+        external 
+        onlyOwner 
+    {
         fraudWindow = _newFraudWindow;
         emit FraudWindowChanged(_newFraudWindow);
     }
 
     /**
      * @notice checks to see if:
-     * 1	The relayer has sent an active message in preVerification
-     * 2    The message sent has not been flagged as compromised by m-of-n watchers
-     * 3	The submodule used has not been flagged as compromised by m-of-n watchers
+     * 1	The relayer passed verification() during preVerify() (evident my their entry in the relayers mapping)
+     * 2    The submodule used has not been flagged as compromised by m-of-n watchers
+     * 3	The message sent has not been flagged as compromised by m-of-n watchers
      * 4	The fraud window has elapsed
      */
-    function preVerifiedCheck() internal view returns (bool) {
+    function verify() 
+        internal 
+        view 
+        returns (bool) 
+    {
         bytes memory message = _relayerToMessages[msg.sender];
         bool flagsForSubModulesPass = mOfNSubModuleCheck(message);
         bool flagsForMessagesPass = mOfNMessageFlagCheck(message);
@@ -231,7 +241,10 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
      * @notice allows watchers added by owner to flag messages as fraudulent
      * @param _message message to be marked as fraudulent
      */
-    function flagMessageAsFraudulent(bytes memory _message) public onlyWatcher {
+    function flagMessageAsFraudulent(bytes memory _message) 
+        public 
+        onlyWatcher 
+    {
         // messagesToFraudFlags[_message] = true;
         if (!watcherAlreadyFlaggedMessage[msg.sender][_message]) {
             messageFlagCount[_message]++;
@@ -276,7 +289,7 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
      * @param _metadata arbitrary bytes that can be specified by an off-chain relayer, used in message verification
      * @param  _message formatted Hyperlane message (see Message.sol).
      */
-    function verify(bytes memory _metadata, bytes memory _message)
+    function verification(bytes memory _metadata, bytes memory _message)
         public
         nonReentrant
         returns (bool)
@@ -289,8 +302,8 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice recieves and stores message and metadata sent by a relayer,
-     *         adding their addresses to the relayers mapping,
+     * @notice recieves, verifies and stores message and metadata sent by a relayer,
+     *         adding their address to the relayers mapping,
      *         initiating a fraudWindow, mapping the message to this fraudWindow and
      *         mapping the message sent to the submodule used to verify the message
      * @param  _metadata arbitrary bytes that can be specified by an off-chain relayer, used in message verification
@@ -301,17 +314,22 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
         override
         returns (bool)
     {
+        bool verified = verification(_metadata, _message);
+        if (verified) {
         _relayerToMessages[msg.sender] = _message;
         _relayerToMetadata[msg.sender] = _metadata;
         _initiateFraudWindow(_message);
         emit FraudWindowOpened(currentModule);
         emit RelayerCalledMessagePreVerify(msg.sender);
         return true;
+        } else {
+            return false;
+        }
     }
 
     /**
-     * @notice calls preVerifiedCheck() to ensure the submodule has not been flagged as fraudulent
-     *         and, if preVerifiedCheck() returns true, verifies the message and
+     * @notice calls verify() to ensure the submodule has not been flagged as fraudulent
+     *         and, if verify() returns true, verifies the message and
      *         delivers it to the destination address. thereafter, the relayer's message
      *         mapping is marked false, opening the gate for more messages to be sent
      * @param  _destination destination for message sent by relayer (msg.sender)
@@ -322,39 +340,14 @@ abstract contract OptimisticIsm is IOptimisticIsm, Ownable, ReentrancyGuard {
         nonReentrant
     {
         bytes storage message = _relayerToMessages[msg.sender];
-        bytes storage metadata = _relayerToMetadata[msg.sender];
-        bool isVerified = verify(metadata, message);
-        if (isVerified) {
-            bool verifiedMessagePassesChecks = preVerifiedCheck();
-            if (verifiedMessagePassesChecks) {
-                Address.functionCallWithValue(_destination, message, _value);
-                relayers[msg.sender] = false;
-                emit MessageDelivered(message);
-            }
+        bool verifiedMessagePassesChecks = verify();
+        if (verifiedMessagePassesChecks) 
+        {
+            Address.functionCallWithValue(_destination, message, _value);
+            relayers[msg.sender] = false;
+            emit MessageDelivered(message);
         }
     }
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////////////
-/*
-@dev
-notes and thoughts on contract architecture;
-    1   This architecture runs on the premise that each relayer can only send 1 message at a time 
-            through the OptimisticISM
-    2   What if a submodule has been modified after it has been pre-verified? On this basis (and the ambiguity of the brief),
-            the Optimistic model is followed in the sense that message **verification** and **deliver** are seperated by a 
-            configurable fraud window, where (once the fraud window has passed) the messages are viable to be verified 
-            (called as part of message delivery, as defined in the brief) and delivered
-    3   All trust is put in the hands of watchers, who don't seem to be incentivised at this stage.
-    4   Any and all watchers can flag submodules and messages as fraudulent
-    5   Anyone can relay messages to the ISM
-    6   What degree of privacy each operator (owner) of the OptimisticIsm wants is unclear. For the sake
-            of security and clarity, all modifications to message, submodule state and fraudulence have been 
-            included as events
-    7   To ensure long term compatibility, the deliver() function has been made payable to allow passing ETH
-            forward depending on the reciever of the message 
-    8   I couldn't be clear on how implementing another contract via StaticMOfNAddressSetFactory may save gas when
-            __configuring watchers__ as compared to the configureWatchers() implementation shown here, which simply
-            utilises the getter/setter in a mapping to configure watchers based on any _watcherArray and _statuses passed
- */
-//////////////////////////////////////////////////////////////////////////////////////////////////
+
